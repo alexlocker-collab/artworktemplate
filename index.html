@@ -13,7 +13,6 @@
       --muted:#475569;
       --danger:#dc2626;
       --tab:#e2e8f0;
-      --preview-bg:#d1d5db;
     }
 
     * { box-sizing:border-box; }
@@ -134,19 +133,11 @@
       border:1px solid var(--border);
       border-radius:16px;
       padding:24px;
-      background:var(--preview-bg);
+      background:#fff;
       display:flex;
       justify-content:center;
       align-items:center;
       overflow:auto;
-    }
-
-    .preview-page-wrap {
-      display:inline-flex;
-      justify-content:center;
-      align-items:center;
-      padding:16px;
-      background:transparent;
     }
 
     .detail-list > * + * {
@@ -237,16 +228,6 @@
 
     .hidden {
       display:none !important;
-    }
-
-    .utility-row {
-      display:grid;
-      grid-template-columns:1fr 1fr;
-      gap:12px;
-    }
-
-    .file-input {
-      display:none;
     }
 
     @media (max-width:1100px) {
@@ -356,13 +337,10 @@
             <div id="rule"></div>
           </div>
 
-          <div class="utility-row">
-            <button id="exportSettingsBtn" class="button secondary" type="button">Export Settings</button>
-            <button id="importSettingsBtn" class="button secondary" type="button">Import Settings</button>
+          <div class="grid-2">
+            <button id="exportPdfBtn" class="button" type="button">Export PDF</button>
+            <button id="exportPdf50Btn" class="button secondary" type="button">Export PDF @ 50% Size</button>
           </div>
-          <input id="importSettingsFile" class="file-input" type="file" accept=".json,application/json" />
-
-          <button id="exportPdfBtn" class="button" type="button">Export PDF</button>
 
           <div id="ok" class="ok hidden">Export started.</div>
           <div id="err" class="error hidden"></div>
@@ -382,9 +360,7 @@
         <div class="card-header"><h2 class="card-title">Live Preview</h2></div>
         <div class="card-content">
           <div class="preview-shell">
-            <div class="preview-page-wrap">
-              <canvas id="previewCanvas" width="900" height="900"></canvas>
-            </div>
+            <canvas id="previewCanvas" width="900" height="900"></canvas>
           </div>
         </div>
       </div>
@@ -402,8 +378,9 @@
     const MM_PER_INCH = 25.4;
     const PREVIEW_MAX = 780;
     const MAX_PDF_MM = 20000;
+    const MAX_PDF_BASE_UNITS = 14000;
     const PT_PER_MM = 72 / 25.4;
-    const MAX_MASKS = 10;
+    const MAX_MASKS = 5;
     const OPACITY_OPTIONS = [10,20,30,40,50,60,70,80,90,100];
 
     const MATERIALS = {
@@ -1028,16 +1005,31 @@
       return stream;
     }
 
-    function buildVectorPdfBlob(s) {
-      const widthPt = s.totalWmm * PT_PER_MM;
-      const heightPt = s.totalHmm * PT_PER_MM;
+    function buildVectorPdfBlob(s, exportScale = 1) {
+      const safeExportScale = clamp(Number(exportScale) || 1, 0.01, 1);
+      const sourceWidthPt = s.totalWmm * PT_PER_MM;
+      const sourceHeightPt = s.totalHmm * PT_PER_MM;
+      const widthPt = sourceWidthPt * safeExportScale;
+      const heightPt = sourceHeightPt * safeExportScale;
+
+      // PDF page boxes are widely limited to 14,400 default user-space units
+      // (about 5.08m at the normal 72 units per inch). For larger artwork,
+      // use PDF 1.6 /UserUnit and proportionally reduce the MediaBox and
+      // content coordinates. The resulting PDF retains its true physical size.
+      const userUnit = Math.max(1, Math.max(widthPt, heightPt) / MAX_PDF_BASE_UNITS);
+      const mediaWidth = widthPt / userUnit;
+      const mediaHeight = heightPt / userUnit;
 
       const l = getLayout(s, { width: s.totalWmm, height: s.totalHmm, scale: 1 });
-      l.heightPt = heightPt;
+      l.heightPt = sourceHeightPt;
 
-      let stream = "";
+      const contentScale = safeExportScale / userUnit;
+      const useContentTransform = Math.abs(contentScale - 1) > 0.0000001;
+      let stream = useContentTransform
+        ? `q\n${contentScale} 0 0 ${contentScale} 0 0 cm\n`
+        : "";
 
-      const topY = (mm) => heightPt - (mm * PT_PER_MM);
+      const topY = (mm) => sourceHeightPt - (mm * PT_PER_MM);
 
       const rectStroke = (x, y, w, h, r, g, b, lineW) => {
         stream += `${r} ${g} ${b} RG\n${lineW} w\n${x*PT_PER_MM} ${topY(y+h)} ${w*PT_PER_MM} ${h*PT_PER_MM} re S\n`;
@@ -1066,7 +1058,7 @@
         addAlpha(Number(mask.textOpacity || 0) / 100);
       });
 
-      stream += `1 1 1 rg\n0 0 ${widthPt} ${heightPt} re f\n`;
+      stream += `1 1 1 rg\n0 0 ${sourceWidthPt} ${sourceHeightPt} re f\n`;
 
       rectStroke(
         s.cfg.bleedMm,
@@ -1147,16 +1139,18 @@
         gsIds[name] = add(`<< /Type /ExtGState /ca ${alpha} /CA ${alpha} >>`);
       });
 
+      if (useContentTransform) stream += "Q\n";
+
       const contentId = add(`<< /Length ${new TextEncoder().encode(stream).length} >>\nstream\n${stream}\nendstream`);
       const extGs = Object.entries(gsIds).map(([name, id]) => `/${name} ${id} 0 R`).join(" ");
       const resources = `<< /Font << /F1 ${fontId} 0 R >>${extGs ? ` /ExtGState << ${extGs} >>` : ""} >>`;
 
-      const pageId = add(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${widthPt} ${heightPt}] /Resources ${resources} /Contents ${contentId} 0 R >>`);
+      const pageId = add(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${mediaWidth} ${mediaHeight}]${userUnit > 1 ? ` /UserUnit ${userUnit}` : ""} /Resources ${resources} /Contents ${contentId} 0 R >>`);
       const pagesId = add(`<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`);
       objects[pageId - 1] = objects[pageId - 1].replace("/Parent 0 0 R", `/Parent ${pagesId} 0 R`);
       const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
 
-      let pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+      let pdf = "%PDF-1.6\n%\xE2\xE3\xCF\xD3\n";
       const offsets = [0];
 
       for (let i = 0; i < objects.length; i++) {
@@ -1429,148 +1423,61 @@
       el("h").value = String(Math.round(fromMm(hMm, newUnit) * 1000000) / 1000000);
     }
 
-    function getSerializableState() {
-      return {
-        version: 1,
-        canvas: {
-          w: el("w").value,
-          h: el("h").value,
-          unit: el("unit").value,
-          material: el("material").value,
-          customBleed: el("customBleed").value,
-          ppi: el("ppi").value,
-          templateName: el("templateName").value,
-          job: el("job").value,
-          art: el("art").value,
-          date: el("date").value,
-          matinfo: el("matinfo").value,
-          note: el("note").value
-        },
-        masks: masks.map(mask => ({ ...mask }))
-      };
-    }
-
-    function applySerializableState(state) {
-      if (!state || typeof state !== "object") throw new Error("Invalid settings file.");
-
-      const canvas = state.canvas || {};
-      el("w").value = canvas.w ?? "1000";
-      el("h").value = canvas.h ?? "2000";
-      el("unit").value = canvas.unit ?? "mm";
-      el("material").value = canvas.material ?? "Foamex / Hard Materials";
-      el("customBleed").value = canvas.customBleed ?? "10";
-      el("ppi").value = canvas.ppi ?? "90";
-      el("templateName").value = canvas.templateName ?? "Artwork Template";
-      el("job").value = canvas.job ?? "";
-      el("art").value = canvas.art ?? "";
-      el("date").value = canvas.date ?? "";
-      el("matinfo").value = canvas.matinfo ?? "";
-      el("note").value = canvas.note ?? "All artwork should be submitted as high resolution PDFs.";
-
-      masks = Array.isArray(state.masks) ? state.masks.slice(0, MAX_MASKS).map((mask, i) => ({
-        id: mask.id || `mask_${Date.now()}_${i}`,
-        name: mask.name ?? `Mask ${i + 1}`,
-        shape: mask.shape ?? "Rectangle",
-        sizeUnit: mask.sizeUnit ?? "mm",
-        positionUnit: mask.positionUnit ?? "mm",
-        width: mask.width ?? "500",
-        height: mask.height ?? "500",
-        diameter: mask.diameter ?? "500",
-        flip: mask.flip ?? "bottom-left",
-        x: mask.x ?? "0",
-        y: mask.y ?? "0",
-        fillColor: mask.fillColor ?? "#ff0000",
-        fillOpacity: Number(mask.fillOpacity ?? 30),
-        textColor: mask.textColor ?? "#000000",
-        textOpacity: Number(mask.textOpacity ?? 100),
-        textAlignY: mask.textAlignY ?? "middle"
-      })) : [];
-
+    function resetForm() {
+      el("w").value = "1000";
+      el("h").value = "2000";
+      el("unit").value = "mm";
+      el("material").value = "Foamex / Hard Materials";
+      el("customBleed").value = "10";
+      el("ppi").value = "90";
+      el("templateName").value = "Artwork Template";
+      el("job").value = "";
+      el("art").value = "";
+      el("date").value = "";
+      el("matinfo").value = "";
+      el("note").value = "All artwork should be submitted as high resolution PDFs.";
+      masks = [];
       renderMasksPane();
       drawPreview();
-    }
-
-    function resetForm() {
-      applySerializableState({
-        canvas: {
-          w: "1000",
-          h: "2000",
-          unit: "mm",
-          material: "Foamex / Hard Materials",
-          customBleed: "10",
-          ppi: "90",
-          templateName: "Artwork Template",
-          job: "",
-          art: "",
-          date: "",
-          matinfo: "",
-          note: "All artwork should be submitted as high resolution PDFs."
-        },
-        masks: []
-      });
       switchTab("canvas");
     }
 
-    async function exportPDF() {
+    async function exportPDF(exportScale = 1) {
       const s = getState();
+      const safeExportScale = clamp(Number(exportScale) || 1, 0.01, 1);
 
       if (!(s.visibleWmm > 0 && s.visibleHmm > 0 && s.ppi > 0)) return;
 
-      if (s.totalWmm > MAX_PDF_MM || s.totalHmm > MAX_PDF_MM) {
-        el("err").textContent = `PDF size exceeds browser-safe limits. Maximum supported side is ${MAX_PDF_MM}mm.`;
+      const exportedWmm = s.totalWmm * safeExportScale;
+      const exportedHmm = s.totalHmm * safeExportScale;
+
+      if (exportedWmm > MAX_PDF_MM || exportedHmm > MAX_PDF_MM) {
+        el("err").textContent = `Exported PDF size exceeds browser-safe limits. Maximum supported side is ${MAX_PDF_MM}mm.`;
         el("err").classList.remove("hidden");
         return;
       }
 
-      const btn = el("exportPdfBtn");
+      const isHalfSize = safeExportScale === 0.5;
+      const btn = el(isHalfSize ? "exportPdf50Btn" : "exportPdfBtn");
+      const defaultLabel = isHalfSize ? "Export PDF @ 50% Size" : "Export PDF";
       btn.disabled = true;
       btn.textContent = "Exporting...";
 
       try {
-        const blob = buildVectorPdfBlob(s);
-        downloadBlob(blob, `${filenameBase(s)}.pdf`);
-        el("ok").textContent = "PDF export started.";
+        const blob = buildVectorPdfBlob(s, safeExportScale);
+        const scaleSuffix = isHalfSize ? " - 50 Percent Scale" : "";
+        downloadBlob(blob, `${filenameBase(s)}${scaleSuffix}.pdf`);
+        el("ok").textContent = isHalfSize
+          ? "50% size PDF export started."
+          : "PDF export started.";
         el("ok").classList.remove("hidden");
       } catch (err) {
         el("err").textContent = err && err.message ? err.message : "PDF export failed.";
         el("err").classList.remove("hidden");
       } finally {
         btn.disabled = false;
-        btn.textContent = "Export PDF";
+        btn.textContent = defaultLabel;
       }
-    }
-
-    function exportSettings() {
-      try {
-        const state = getSerializableState();
-        const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
-        downloadBlob(blob, `${filenameBase(getState())} - Settings.json`);
-        el("ok").textContent = "Settings export started.";
-        el("ok").classList.remove("hidden");
-      } catch (err) {
-        el("err").textContent = err && err.message ? err.message : "Settings export failed.";
-        el("err").classList.remove("hidden");
-      }
-    }
-
-    function importSettingsFromFile(file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const parsed = JSON.parse(String(reader.result || "{}"));
-          applySerializableState(parsed);
-          el("ok").textContent = "Settings imported.";
-          el("ok").classList.remove("hidden");
-        } catch (err) {
-          el("err").textContent = err && err.message ? err.message : "Settings import failed.";
-          el("err").classList.remove("hidden");
-        }
-      };
-      reader.onerror = () => {
-        el("err").textContent = "Could not read settings file.";
-        el("err").classList.remove("hidden");
-      };
-      reader.readAsText(file);
     }
 
     canvasInputs.forEach(id => {
@@ -1610,14 +1517,8 @@
       drawPreview();
     });
 
-    el("exportPdfBtn").addEventListener("click", exportPDF);
-    el("exportSettingsBtn").addEventListener("click", exportSettings);
-    el("importSettingsBtn").addEventListener("click", () => el("importSettingsFile").click());
-    el("importSettingsFile").addEventListener("change", (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (file) importSettingsFromFile(file);
-      e.target.value = "";
-    });
+    el("exportPdfBtn").addEventListener("click", () => exportPDF(1));
+    el("exportPdf50Btn").addEventListener("click", () => exportPDF(0.5));
 
     renderMasksPane();
     drawPreview();
