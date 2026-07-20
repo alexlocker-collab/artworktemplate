@@ -636,7 +636,16 @@
     }
 
     function buildArtworkInfoLines(s) {
+      const pdfScale = Number(s.pdfExportScale || 1);
+      const scaleLines = pdfScale < 0.999999
+        ? [
+            `PDF Scale: ${round(pdfScale * 100, 2)}% — PRINT AT ${round(100 / pdfScale, 2)}%`,
+            `Finished Total Size: ${round(s.totalWmm,1)} × ${round(s.totalHmm,1)} mm`
+          ]
+        : [];
+
       return [
+        ...scaleLines,
         `Visible: ${round(s.visibleWmm,1)} × ${round(s.visibleHmm,1)} mm`,
         `Pixels: ${s.visibleWpx.toLocaleString()} × ${s.visibleHpx.toLocaleString()} px`,
         ...(s.material === "Set Wrap" ? [
@@ -1012,18 +1021,18 @@
       const widthPt = sourceWidthPt * safeExportScale;
       const heightPt = sourceHeightPt * safeExportScale;
 
-      // PDF page boxes are widely limited to 14,400 default user-space units
-      // (about 5.08m at the normal 72 units per inch). For larger artwork,
-      // use PDF 1.6 /UserUnit and proportionally reduce the MediaBox and
-      // content coordinates. The resulting PDF retains its true physical size.
-      const userUnit = Math.max(1, Math.max(widthPt, heightPt) / MAX_PDF_BASE_UNITS);
-      const mediaWidth = widthPt / userUnit;
-      const mediaHeight = heightPt / userUnit;
+      // Do not rely on PDF /UserUnit for large pages. Several browsers, RIPs
+      // and PDF viewers ignore it and clamp the page to 14,000 points. The
+      // export controller automatically selects a production-safe scale first.
+      const userUnit = 1;
+      const mediaWidth = widthPt;
+      const mediaHeight = heightPt;
 
-      const l = getLayout(s, { width: s.totalWmm, height: s.totalHmm, scale: 1 });
+      const exportState = { ...s, pdfExportScale: safeExportScale };
+      const l = getLayout(exportState, { width: s.totalWmm, height: s.totalHmm, scale: 1 });
       l.heightPt = sourceHeightPt;
 
-      const contentScale = safeExportScale / userUnit;
+      const contentScale = safeExportScale;
       const useContentTransform = Math.abs(contentScale - 1) > 0.0000001;
       let stream = useContentTransform
         ? `q\n${contentScale} 0 0 ${contentScale} 0 0 cm\n`
@@ -1145,7 +1154,7 @@
       const extGs = Object.entries(gsIds).map(([name, id]) => `/${name} ${id} 0 R`).join(" ");
       const resources = `<< /Font << /F1 ${fontId} 0 R >>${extGs ? ` /ExtGState << ${extGs} >>` : ""} >>`;
 
-      const pageId = add(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${mediaWidth} ${mediaHeight}]${userUnit > 1 ? ` /UserUnit ${userUnit}` : ""} /Resources ${resources} /Contents ${contentId} 0 R >>`);
+      const pageId = add(`<< /Type /Page /Parent 0 0 R /MediaBox [0 0 ${mediaWidth} ${mediaHeight}] /Resources ${resources} /Contents ${contentId} 0 R >>`);
       const pagesId = add(`<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`);
       objects[pageId - 1] = objects[pageId - 1].replace("/Parent 0 0 R", `/Parent ${pagesId} 0 R`);
       const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
@@ -1444,9 +1453,14 @@
 
     async function exportPDF(exportScale = 1) {
       const s = getState();
-      const safeExportScale = clamp(Number(exportScale) || 1, 0.01, 1);
+      const requestedScale = clamp(Number(exportScale) || 1, 0.01, 1);
 
       if (!(s.visibleWmm > 0 && s.visibleHmm > 0 && s.ppi > 0)) return;
+
+      const fullWidthPt = s.totalWmm * PT_PER_MM;
+      const fullHeightPt = s.totalHmm * PT_PER_MM;
+      const requiresSafeScale = requestedScale === 1 && Math.max(fullWidthPt, fullHeightPt) > MAX_PDF_BASE_UNITS;
+      const safeExportScale = requiresSafeScale ? 0.5 : requestedScale;
 
       const exportedWmm = s.totalWmm * safeExportScale;
       const exportedHmm = s.totalHmm * safeExportScale;
@@ -1458,18 +1472,24 @@
       }
 
       const isHalfSize = safeExportScale === 0.5;
-      const btn = el(isHalfSize ? "exportPdf50Btn" : "exportPdfBtn");
-      const defaultLabel = isHalfSize ? "Export PDF @ 50% Size" : "Export PDF";
+      const clickedHalfButton = requestedScale === 0.5;
+      const btn = el(clickedHalfButton ? "exportPdf50Btn" : "exportPdfBtn");
+      const defaultLabel = clickedHalfButton ? "Export PDF @ 50% Size" : "Export PDF";
       btn.disabled = true;
       btn.textContent = "Exporting...";
 
       try {
         const blob = buildVectorPdfBlob(s, safeExportScale);
-        const scaleSuffix = isHalfSize ? " - 50 Percent Scale" : "";
+        const scaleSuffix = isHalfSize ? " - 50 Percent Scale - Print at 200 Percent" : "";
         downloadBlob(blob, `${filenameBase(s)}${scaleSuffix}.pdf`);
-        el("ok").textContent = isHalfSize
-          ? "50% size PDF export started."
-          : "PDF export started.";
+
+        if (requiresSafeScale) {
+          el("ok").textContent = "This artwork exceeds the reliable full-size PDF page limit. A 50% scale PDF was exported automatically; print it at 200%.";
+        } else if (isHalfSize) {
+          el("ok").textContent = "50% size PDF exported; print it at 200% for finished size.";
+        } else {
+          el("ok").textContent = "Full-size PDF export started.";
+        }
         el("ok").classList.remove("hidden");
       } catch (err) {
         el("err").textContent = err && err.message ? err.message : "PDF export failed.";
