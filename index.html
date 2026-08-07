@@ -342,6 +342,12 @@
             <button id="exportPdf50Btn" class="button secondary" type="button">Export PDF @ 50% Size</button>
           </div>
 
+          <div class="grid-2">
+            <button id="exportProjectBtn" class="button secondary" type="button">Export Project</button>
+            <button id="importProjectBtn" class="button secondary" type="button">Import Project</button>
+          </div>
+          <input id="importProjectFile" type="file" accept=".json,application/json" class="hidden" />
+
           <div id="ok" class="ok hidden">Export started.</div>
           <div id="err" class="error hidden"></div>
         </div>
@@ -1451,6 +1457,101 @@
       switchTab("canvas");
     }
 
+    function buildProjectData() {
+      return {
+        format: "Artwork Template Generator Project",
+        version: 1,
+        savedAt: new Date().toISOString(),
+        canvas: {
+          width: el("w").value,
+          height: el("h").value,
+          unit: el("unit").value,
+          material: el("material").value,
+          customBleed: el("customBleed").value,
+          ppi: el("ppi").value,
+          templateName: el("templateName").value,
+          job: el("job").value,
+          art: el("art").value,
+          date: el("date").value,
+          matinfo: el("matinfo").value,
+          note: el("note").value
+        },
+        masks: masks.map(mask => ({ ...mask }))
+      };
+    }
+
+    function exportProject() {
+      try {
+        const project = buildProjectData();
+        const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+        downloadBlob(blob, `${filenameBase(getState())} - Project.json`);
+        el("err").classList.add("hidden");
+        el("ok").textContent = "Project exported. This file can be imported later to restore the template and masks.";
+        el("ok").classList.remove("hidden");
+      } catch (err) {
+        el("err").textContent = err && err.message ? err.message : "Project export failed.";
+        el("err").classList.remove("hidden");
+      }
+    }
+
+    function normaliseImportedMask(mask, index) {
+      return {
+        ...defaultMask(index),
+        ...(mask && typeof mask === "object" ? mask : {}),
+        id: `mask_${Date.now()}_${index}`
+      };
+    }
+
+    function applyProjectData(project) {
+      if (!project || typeof project !== "object") throw new Error("Invalid project file.");
+      if (project.format && project.format !== "Artwork Template Generator Project") {
+        throw new Error("This JSON file is not an Artwork Template Generator project.");
+      }
+
+      const c = project.canvas || project;
+      const setIfPresent = (id, value) => {
+        if (value !== undefined && value !== null) el(id).value = String(value);
+      };
+
+      setIfPresent("w", c.width ?? c.w);
+      setIfPresent("h", c.height ?? c.h);
+      setIfPresent("unit", c.unit);
+      setIfPresent("material", c.material);
+      setIfPresent("customBleed", c.customBleed);
+      setIfPresent("ppi", c.ppi);
+      setIfPresent("templateName", c.templateName);
+      setIfPresent("job", c.job);
+      setIfPresent("art", c.art);
+      setIfPresent("date", c.date);
+      setIfPresent("matinfo", c.matinfo);
+      setIfPresent("note", c.note);
+
+      const importedMasks = Array.isArray(project.masks) ? project.masks : [];
+      masks = importedMasks.slice(0, MAX_MASKS).map(normaliseImportedMask);
+
+      el("unit").dataset.prevValue = el("unit").value;
+      renderMasksPane();
+      drawPreview();
+      switchTab("canvas");
+    }
+
+    async function importProjectFile(file) {
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const project = JSON.parse(text);
+        applyProjectData(project);
+        el("err").classList.add("hidden");
+        el("ok").textContent = "Project imported successfully.";
+        el("ok").classList.remove("hidden");
+      } catch (err) {
+        el("err").textContent = err && err.message ? err.message : "Project import failed.";
+        el("err").classList.remove("hidden");
+      } finally {
+        el("importProjectFile").value = "";
+      }
+    }
+
     async function exportPDF(exportScale = 1) {
       const s = getState();
       const requestedScale = clamp(Number(exportScale) || 1, 0.01, 1);
@@ -1539,6 +1640,9 @@
 
     el("exportPdfBtn").addEventListener("click", () => exportPDF(1));
     el("exportPdf50Btn").addEventListener("click", () => exportPDF(0.5));
+    el("exportProjectBtn").addEventListener("click", exportProject);
+    el("importProjectBtn").addEventListener("click", () => el("importProjectFile").click());
+    el("importProjectFile").addEventListener("change", (e) => importProjectFile(e.target.files && e.target.files[0]));
 
     renderMasksPane();
     drawPreview();
